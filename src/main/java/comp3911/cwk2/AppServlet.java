@@ -3,8 +3,6 @@ package comp3911.cwk2;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.spec.KeySpec;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -23,8 +21,6 @@ import java.util.List;
 import java.util.Map;
 import org.json.JSONObject;
 
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -39,8 +35,8 @@ import freemarker.template.TemplateExceptionHandler;
 public class AppServlet extends HttpServlet {
 
     private static final String CONNECTION_URL = "jdbc:sqlite:db.sqlite3";
+    private static final String AUTH_QUERY = "select * from user where username=? and password=?";
     private static final String SEARCH_QUERY = "select * from patient where surname=? collate nocase";
-    private static final String GET_SALT = "select hash, salt from user where username=?";
 
     // replace with env
     private static final String TURNSTIL_SITE_KEY = "0x4AAAAAACCRXf3o8M8po2RJ";
@@ -151,7 +147,11 @@ public class AppServlet extends HttpServlet {
             if (authenticated(username, password)) {
                 // Get search results and merge with template
                 Map<String, Object> model = new HashMap<>();
-                model.put("records", searchResults(surname));
+                // FIX for Flaw #5 (Broken Access Control): enforce doctor-patient relationship
+                String doctorId = getDoctorIdForUser(username);
+
+                model.put("records", searchResults(surname, doctorId));
+
                 Template template = fm.getTemplate("details.html");
                 template.process(model, response.getWriter());
             } else {
@@ -166,56 +166,54 @@ public class AppServlet extends HttpServlet {
     }
 
     private boolean authenticated(String username, String password) throws SQLException {
-
-        try(PreparedStatement getsalt = database.prepareStatement(GET_SALT)){
-
-            //Construct SQL query to retrieve hash and salt
-            getsalt.setString(1, username);
-            ResultSet resultSet = getsalt.executeQuery();
-
-            //check the username existed and a result set was returned
-            if (!resultSet.next()){
-                return false;
-            }
-
-            //Retrieve hashes and salt from result set
-            byte[] salt = resultSet.getBytes("salt");
-            byte[] hash = resultSet.getBytes("hash");
-
-            //generate hash from attempt and salt
-            byte[] hash_attempt = get_hash(salt, password);
-
-            return MessageDigest.isEqual(hash, hash_attempt);
-        }
-    }
-
-    private byte[] get_hash(byte[] salt, String password) {
-        try {
-            KeySpec spec = new PBEKeySpec(password.toCharArray(), salt, 65536, 256); // 256 bits
-            SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1");
-            return factory.generateSecret(spec).getEncoded();
-        } catch (Exception e) {
-            throw new RuntimeException("Hashing failed", e);
-    }
-}
-
-    private List<Record> searchResults(String surname) throws SQLException {
-        List<Record> records = new ArrayList<>();
-        try (PreparedStatement stmt = database.prepareStatement(SEARCH_QUERY)) {
-            stmt.setString(1, surname);
+        try (PreparedStatement stmt = database.prepareStatement(AUTH_QUERY)) {
+            stmt.setString(1, username);
+            stmt.setString(2, password);
 
             ResultSet results = stmt.executeQuery();
-            while (results.next()) {
-                Record rec = new Record();
-                rec.setSurname(results.getString(2));
-                rec.setForename(results.getString(3));
-                rec.setAddress(results.getString(4));
-                rec.setDateOfBirth(results.getString(5));
-                rec.setDoctorId(results.getString(6));
-                rec.setDiagnosis(results.getString(7));
-                records.add(rec);
-            }
+            return results.next();
         }
-        return records;
     }
+// FIX for Flaw #5 (Broken Access Control): retrieve doctorId for logged-in user
+private String getDoctorIdForUser(String username) throws SQLException {
+    String query = "SELECT doctorId FROM user WHERE username = ?";
+
+    try (PreparedStatement stmt = database.prepareStatement(query)) {
+        stmt.setString(1, username);
+        ResultSet rs = stmt.executeQuery();
+
+        if (rs.next()) {
+            return rs.getString("doctorId");
+        }
+    }
+    return null;
+}
+
+    // FIX for Flaw #5 (Broken Access Control): restrict results to patients of this doctor
+private List<Record> searchResults(String surname, String doctorId) throws SQLException {
+
+    String query = "SELECT * FROM patient WHERE surname=? COLLATE NOCASE AND doctorId=?";
+
+    List<Record> records = new ArrayList<>();
+
+    try (PreparedStatement stmt = database.prepareStatement(query)) {
+        stmt.setString(1, surname);
+        stmt.setString(2, doctorId);
+
+        ResultSet results = stmt.executeQuery();
+
+        while (results.next()) {
+            Record rec = new Record();
+            rec.setSurname(results.getString("surname"));
+            rec.setForename(results.getString("forename"));
+            rec.setAddress(results.getString("address"));
+            rec.setDateOfBirth(results.getString("dateOfBirth"));
+            rec.setDoctorId(results.getString("doctorId"));
+            rec.setDiagnosis(results.getString("diagnosis"));
+            records.add(rec);
+        }
+    }
+    return records;
+}
+
 }
